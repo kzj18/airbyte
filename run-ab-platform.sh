@@ -18,6 +18,7 @@ PS4="$blue_text""${0}:${LINENO}: ""$default_text"
 # 全局curl参数变量
 curlVerboseOption="-s"  # 默认silent模式
 curlProxyOption=""      # 默认无代理
+skipInteractiveConfig=false  # 是否跳过交互式配置
 
 ############################################################
 # Help                                                     #
@@ -25,20 +26,21 @@ curlProxyOption=""      # 默认无代理
 Help()
 {
    # Display Help
-   echo -e "This Script will download the necessary files for running docker compose"
+   echo -e "This Script will copy the necessary files from assets directory for running docker compose"
    echo -e "It will also run docker compose up"
-   echo -e "Take Warning! These assets may become stale over time!"
+   echo -e "Assets are bundled with the repository to avoid downloading from remote sources!"
    echo
    # $0 is the currently running program
    echo -e "Syntax: $0"
    echo -e "options:"
-   echo -e "   -d --download    Only download files - don't run docker compose"
-   echo -e "   -r --refresh     ${red_text}DELETE${default_text} existing assets and re-download new ones"
+   echo -e "   -d --download    Only copy files from assets - don't run docker compose"
+   echo -e "   -r --refresh     ${red_text}DELETE${default_text} existing assets and re-copy new ones"
    echo -e "   -h --help        Print this Help."
    echo -e "   -x --debug       Verbose mode (enables set -o xtrace and curl -v)."
    echo -e "   -b --background  Run docker compose up in detached mode."
    echo -e "      --dnt         Disable telemetry collection"
-   echo -e "      --proxy URL   Use proxy for curl requests (e.g., --proxy http://proxy.example.com:8080)"
+   echo -e "      --proxy URL   Use proxy for telemetry requests (e.g., --proxy http://proxy.example.com:8080)"
+   echo -e "      --no-interact Skip interactive port configuration"
    echo -e ""
 }
 
@@ -51,9 +53,8 @@ docker_compose_debug_yaml="docker-compose.debug.yaml"
             temporal_yaml="temporal/dynamicconfig/development.yaml"
 # any string is an array to POSIX shell. Space separates values
 all_files="$docker_compose_yaml $docker_compose_debug_yaml $dot_env $dot_env_dev $flags $temporal_yaml"
-# Pinning the version this supports at v0.63.13, as docker compose is being deprecated.
-# This has been pinned here as the VERSION variable (found above) is automatically updated as newer versions of Airbyte are released.
-base_github_url="https://raw.githubusercontent.com/airbytehq/airbyte-platform/v0.63.13/"
+# Assets are now bundled with the repository instead of being downloaded
+assets_source_dir="assets"
 
 # event states are used for telemetry data
 readonly eventStateStarted="started"
@@ -61,7 +62,7 @@ readonly eventStateFailed="failed"
 readonly eventStateSuccess="succeeded"
 
 # event types are used for telemetry data
-readonly eventTypeDownload="download"
+readonly eventTypeCopy="copy"
 readonly eventTypeInstall="install"
 readonly eventTypeRefresh="refresh"
 readonly eventTypeUninstall="uninstall"
@@ -232,32 +233,188 @@ EOL
 TelemetryConfig
 
 ############################################################
-# Download                                                 #
+# Interactive Port Configuration                          #
 ############################################################
-Download()
+InteractivePortConfig()
+{
+  local file_content="$1"
+  local file_name="$2"
+  
+  echo -e "${blue_text}=== Interactive Port Configuration for $file_name ===${default_text}" >&2
+  echo -e "You can customize the Airbyte ports. Press Enter to keep default values." >&2
+  echo >&2
+
+  # 配置主要代理端口（所有环境文件都有）
+  if echo "$file_content" | grep -q "AIRBYTE_PROXY_PORT_8000="; then
+    # 从内容中读取当前的端口配置
+    local port_8000=$(echo "$file_content" | grep "AIRBYTE_PROXY_PORT_8000=" | cut -d'=' -f2)
+    local port_8001=$(echo "$file_content" | grep "AIRBYTE_PROXY_PORT_8001=" | cut -d'=' -f2)
+    local port_8003=$(echo "$file_content" | grep "AIRBYTE_PROXY_PORT_8003=" | cut -d'=' -f2)
+    local port_8006=$(echo "$file_content" | grep "AIRBYTE_PROXY_PORT_8006=" | cut -d'=' -f2)
+
+    echo -e "${blue_text}=== Main Airbyte Proxy Ports ===${default_text}" >&2
+    
+    echo -e "${blue_text}Main Airbyte Web Interface:${default_text}" >&2
+    read -p "  AIRBYTE_PROXY_PORT_8000 (default: $port_8000): " new_port_8000
+    if [[ -n "$new_port_8000" ]]; then
+      file_content=$(echo "$file_content" | sed "s/AIRBYTE_PROXY_PORT_8000=.*/AIRBYTE_PROXY_PORT_8000=$new_port_8000/")
+      echo -e "  ${blue_text}✓ Updated to $new_port_8000${default_text}" >&2
+    else
+      echo -e "  ${blue_text}✓ Keeping default $port_8000${default_text}" >&2
+    fi
+
+    echo -e "${blue_text}Airbyte API Server:${default_text}" >&2
+    read -p "  AIRBYTE_PROXY_PORT_8001 (default: $port_8001): " new_port_8001
+    if [[ -n "$new_port_8001" ]]; then
+      file_content=$(echo "$file_content" | sed "s/AIRBYTE_PROXY_PORT_8001=.*/AIRBYTE_PROXY_PORT_8001=$new_port_8001/")
+      echo -e "  ${blue_text}✓ Updated to $new_port_8001${default_text}" >&2
+    else
+      echo -e "  ${blue_text}✓ Keeping default $port_8001${default_text}" >&2
+    fi
+
+    echo -e "${blue_text}Airbyte Internal API:${default_text}" >&2
+    read -p "  AIRBYTE_PROXY_PORT_8003 (default: $port_8003): " new_port_8003
+    if [[ -n "$new_port_8003" ]]; then
+      file_content=$(echo "$file_content" | sed "s/AIRBYTE_PROXY_PORT_8003=.*/AIRBYTE_PROXY_PORT_8003=$new_port_8003/")
+      echo -e "  ${blue_text}✓ Updated to $new_port_8003${default_text}" >&2
+    else
+      echo -e "  ${blue_text}✓ Keeping default $port_8003${default_text}" >&2
+    fi
+
+    echo -e "${blue_text}Airbyte Documentation:${default_text}" >&2
+    read -p "  AIRBYTE_PROXY_PORT_8006 (default: $port_8006): " new_port_8006
+    if [[ -n "$new_port_8006" ]]; then
+      file_content=$(echo "$file_content" | sed "s/AIRBYTE_PROXY_PORT_8006=.*/AIRBYTE_PROXY_PORT_8006=$new_port_8006/")
+      echo -e "  ${blue_text}✓ Updated to $new_port_8006${default_text}" >&2
+    else
+      echo -e "  ${blue_text}✓ Keeping default $port_8006${default_text}" >&2
+    fi
+    echo >&2
+  fi
+
+  # 配置调试端口（仅.env.dev文件有）
+  if [[ "$file_name" == ".env.dev" ]] && echo "$file_content" | grep -q "DB_DEBUG_PORT="; then
+    # 从内容中读取当前的调试端口配置
+    local db_debug_port=$(echo "$file_content" | grep "DB_DEBUG_PORT=" | cut -d'=' -f2)
+    local temporal_debug_port=$(echo "$file_content" | grep "TEMPORAL_UI_DEBUG_PORT=" | cut -d'=' -f2)
+    local worker_debug_port=$(echo "$file_content" | grep "WORKER_DEBUG_PORT=" | cut -d'=' -f2)
+    local server_debug_port=$(echo "$file_content" | grep "SERVER_DEBUG_PORT=" | cut -d'=' -f2)
+    local connector_debug_port=$(echo "$file_content" | grep "CONNECTOR_BUILDER_DEBUG_PORT=" | cut -d'=' -f2)
+
+    echo -e "${blue_text}=== Debug Mode Ports ===${default_text}" >&2
+    
+    echo -e "${blue_text}Database Debug Port:${default_text}" >&2
+    read -p "  DB_DEBUG_PORT (default: $db_debug_port): " new_db_debug_port
+    if [[ -n "$new_db_debug_port" ]]; then
+      file_content=$(echo "$file_content" | sed "s/DB_DEBUG_PORT=.*/DB_DEBUG_PORT=$new_db_debug_port/")
+      echo -e "  ${blue_text}✓ Updated to $new_db_debug_port${default_text}" >&2
+    else
+      echo -e "  ${blue_text}✓ Keeping default $db_debug_port${default_text}" >&2
+    fi
+
+    echo -e "${blue_text}Temporal UI Debug Port:${default_text}" >&2
+    read -p "  TEMPORAL_UI_DEBUG_PORT (default: $temporal_debug_port): " new_temporal_debug_port
+    if [[ -n "$new_temporal_debug_port" ]]; then
+      file_content=$(echo "$file_content" | sed "s/TEMPORAL_UI_DEBUG_PORT=.*/TEMPORAL_UI_DEBUG_PORT=$new_temporal_debug_port/")
+      echo -e "  ${blue_text}✓ Updated to $new_temporal_debug_port${default_text}" >&2
+    else
+      echo -e "  ${blue_text}✓ Keeping default $temporal_debug_port${default_text}" >&2
+    fi
+
+    echo -e "${blue_text}Worker Debug Port:${default_text}" >&2
+    read -p "  WORKER_DEBUG_PORT (default: $worker_debug_port): " new_worker_debug_port
+    if [[ -n "$new_worker_debug_port" ]]; then
+      file_content=$(echo "$file_content" | sed "s/WORKER_DEBUG_PORT=.*/WORKER_DEBUG_PORT=$new_worker_debug_port/")
+      echo -e "  ${blue_text}✓ Updated to $new_worker_debug_port${default_text}" >&2
+    else
+      echo -e "  ${blue_text}✓ Keeping default $worker_debug_port${default_text}" >&2
+    fi
+
+    echo -e "${blue_text}Server Debug Port:${default_text}" >&2
+    read -p "  SERVER_DEBUG_PORT (default: $server_debug_port): " new_server_debug_port
+    if [[ -n "$new_server_debug_port" ]]; then
+      file_content=$(echo "$file_content" | sed "s/SERVER_DEBUG_PORT=.*/SERVER_DEBUG_PORT=$new_server_debug_port/")
+      echo -e "  ${blue_text}✓ Updated to $new_server_debug_port${default_text}" >&2
+    else
+      echo -e "  ${blue_text}✓ Keeping default $server_debug_port${default_text}" >&2
+    fi
+
+    echo -e "${blue_text}Connector Builder Debug Port:${default_text}" >&2
+    read -p "  CONNECTOR_BUILDER_DEBUG_PORT (default: $connector_debug_port): " new_connector_debug_port
+    if [[ -n "$new_connector_debug_port" ]]; then
+      file_content=$(echo "$file_content" | sed "s/CONNECTOR_BUILDER_DEBUG_PORT=.*/CONNECTOR_BUILDER_DEBUG_PORT=$new_connector_debug_port/")
+      echo -e "  ${blue_text}✓ Updated to $new_connector_debug_port${default_text}" >&2
+    else
+      echo -e "  ${blue_text}✓ Keeping default $connector_debug_port${default_text}" >&2
+    fi
+    echo >&2
+  fi
+
+  echo -e "${blue_text}=== Port configuration completed ===${default_text}" >&2
+  echo >&2
+  
+  # 返回修改后的内容
+  echo "$file_content"
+}
+
+############################################################
+# Copy Assets                                              #
+############################################################
+CopyAssets()
 {
   ########## Check if we already have the assets we are looking for ##########
   for file in $all_files; do
     # Account for the case where the file is in a subdirectory.
-    # Make sure the directory exists to keep curl happy.
+    # Make sure the directory exists to keep cp happy.
     dir_path=$(dirname "${file}")
     mkdir -p "${dir_path}"
+    
+    # Check if source file exists in assets directory
+    source_file="${assets_source_dir}/${file}"
+    if [[ ! -f "$source_file" ]]; then
+      echo -e "$red_text""Error: Source file $source_file not found in assets directory!""$default_text"
+      exit 1
+    fi
+    
     if test -f $file; then
-      # Check if the assets are old.  A possibly sharp corner
-      if test $(find $file -type f -mtime +60 > /dev/null); then
-        echo -e "$red_text""Warning your $file may be stale!""$default_text"
-        echo -e "$red_text""rm $file to refresh!""$default_text"
+      # Check if the assets are old by comparing with source
+      if [[ "$source_file" -nt "$file" ]]; then
+        echo -e "$red_text""Warning: your $file is older than the source in assets!""$default_text"
+        echo -e "$red_text""Use -r/--refresh to update!""$default_text"
       else
-        echo -e "$blue_text""found $file locally!""$default_text"
+        echo -e "$blue_text""found $file locally (up to date)!""$default_text"
       fi
     else
-      echo -e "$blue_text""Downloading $file""$default_text"
-      curl --location \
-        --fail \
-        $curlVerboseOption \
-        --show-error \
-        $curlProxyOption \
-        ${base_github_url}${file} > $file
+      echo -e "$blue_text""Copying $file from assets""$default_text"
+      
+      # 对于.env和.env.dev文件，使用特殊的内存处理逻辑
+      if [[ "$file" == ".env" || "$file" == ".env.dev" ]]; then
+        # 读取源文件内容到内存
+        local file_content=$(cat "$source_file")
+        
+        # 如果是环境变量文件且未跳过交互配置，进行交互式端口配置
+        if [[ "$skipInteractiveConfig" == "false" ]]; then
+          file_content=$(InteractivePortConfig "$file_content" "$file")
+        fi
+        
+        # 将处理后的内容写入目标文件
+        echo "$file_content" > "$file"
+        if [[ $? -eq 0 ]]; then
+          echo -e "$blue_text""✓ Successfully processed and saved $file""$default_text"
+        else
+          echo -e "$red_text""✗ Failed to save processed $file""$default_text"
+          exit 1
+        fi
+      else
+        # 对于其他文件，直接复制
+        cp "$source_file" "$file"
+        if [[ $? -eq 0 ]]; then
+          echo -e "$blue_text""✓ Successfully copied $file""$default_text"
+        else
+          echo -e "$red_text""✗ Failed to copy $file""$default_text"
+          exit 1
+        fi
+      fi
     fi
   done
 }
@@ -299,6 +456,9 @@ for argument in $args; do
       set -o xtrace  # -x display every line before execution; enables PS4
       curlVerboseOption="-v"
       ;;
+    --no-interact)
+      skipInteractiveConfig=true
+      ;;
   esac
 done
 
@@ -324,11 +484,11 @@ i=1
 for argument in $args; do
   case $argument in
     -d | --download)
-      TelemetrySend $eventStateStarted $eventTypeDownload
-      trap 'TelemetrySendTrap $eventStateFailed $eventTypeDownload "sigint"' SIGINT
-      trap 'TelemetrySendTrap $eventStateFailed $eventTypeDownload "sigterm"' SIGTERM
-      Download
-      TelemetrySend $eventStateSuccess $eventTypeDownload
+      TelemetrySend $eventStateStarted $eventTypeCopy
+      trap 'TelemetrySendTrap $eventStateFailed $eventTypeCopy "sigint"' SIGINT
+      trap 'TelemetrySendTrap $eventStateFailed $eventTypeCopy "sigterm"' SIGTERM
+      CopyAssets
+      TelemetrySend $eventStateSuccess $eventTypeCopy
       exit
       ;;
     -r | --refresh)
@@ -336,7 +496,7 @@ for argument in $args; do
       trap 'TelemetrySendTrap $eventStateFailed $eventTypeRefresh "sigint"' SIGINT
       trap 'TelemetrySendTrap $eventStateFailed $eventTypeRefresh "sigterm"' SIGTERM
       DeleteLocalAssets
-      Download
+      CopyAssets
       TelemetrySend $eventStateSuccess $eventTypeRefresh
       exit
       ;;
@@ -353,6 +513,9 @@ for argument in $args; do
       # noop, this was checked in the previous for loop
       ;;
     --proxy)
+      # noop, this was handled above
+      ;;
+    --no-interact)
       # noop, this was handled above
       ;;
     *)
@@ -410,7 +573,7 @@ if ! docker compose version >/dev/null 2>/dev/null; then
   exit 1
 fi
 
-Download
+CopyAssets
 
 ########## Source Environmental Variables ##########
 
