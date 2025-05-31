@@ -15,6 +15,10 @@ default_text='\033[0m'
 # set -x/xtrace uses a Sony PS4 for more info
 PS4="$blue_text""${0}:${LINENO}: ""$default_text"
 
+# 全局curl参数变量
+curlVerboseOption="-s"  # 默认silent模式
+curlProxyOption=""      # 默认无代理
+
 ############################################################
 # Help                                                     #
 ############################################################
@@ -31,9 +35,10 @@ Help()
    echo -e "   -d --download    Only download files - don't run docker compose"
    echo -e "   -r --refresh     ${red_text}DELETE${default_text} existing assets and re-download new ones"
    echo -e "   -h --help        Print this Help."
-   echo -e "   -x --debug       Verbose mode."
+   echo -e "   -x --debug       Verbose mode (enables set -o xtrace and curl -v)."
    echo -e "   -b --background  Run docker compose up in detached mode."
    echo -e "      --dnt         Disable telemetry collection"
+   echo -e "      --proxy URL   Use proxy for curl requests (e.g., --proxy http://proxy.example.com:8080)"
    echo -e ""
 }
 
@@ -216,7 +221,7 @@ TelemetrySend()
 }
 EOL
 )
-    curl -s -o /dev/null -H "Content-Type: application/json" -X POST -d "$body" $telemetryURL
+    curl $curlVerboseOption $curlProxyOption -o /dev/null -H "Content-Type: application/json" -X POST -d "$body" $telemetryURL
     if [[ $state = "success" ]]; then {
       telemetrySuccess=true
     }
@@ -247,10 +252,11 @@ Download()
       fi
     else
       echo -e "$blue_text""Downloading $file""$default_text"
-      curl --location\
-        --fail\
-        --silent\
+      curl --location \
+        --fail \
+        $curlVerboseOption \
         --show-error \
+        $curlProxyOption \
         ${base_github_url}${file} > $file
     fi
   done
@@ -289,9 +295,32 @@ for argument in $args; do
     --dnt)
       telemetryEnabled=false
       ;;
+    -x | --debug)
+      set -o xtrace  # -x display every line before execution; enables PS4
+      curlVerboseOption="-v"
+      ;;
   esac
 done
 
+# 处理带值的--proxy参数
+proxy_url_position=0
+i=1
+for argument in $args; do
+  if [[ $argument == "--proxy" ]]; then
+    # 获取下一个参数作为代理URL
+    next_arg=$(echo $args | cut -d' ' -f$((i+1)))
+    if [[ $next_arg != "" && $next_arg != -* ]]; then
+      curlProxyOption="--proxy $next_arg"
+      proxy_url_position=$((i+1))
+    else
+      echo "Error: --proxy requires a URL argument"
+      exit 1
+    fi
+  fi
+  ((i++))
+done
+
+i=1
 for argument in $args; do
   case $argument in
     -d | --download)
@@ -312,10 +341,10 @@ for argument in $args; do
       exit
       ;;
     -x | --debug)
-      set -o xtrace  # -x display every line before execution; enables PS4
+      # noop, this was checked in the previous for loop
       ;;
     -h | --help)
-     # noop, this was checked in the previous for loop
+      # noop, this was checked in the previous for loop
       ;;
     -b | --background)
       # noop, this was checked in the previous for loop
@@ -323,13 +352,23 @@ for argument in $args; do
     --dnt)
       # noop, this was checked in the previous for loop
       ;;
+    --proxy)
+      # noop, this was handled above
+      ;;
     *)
-      echo "$argument is not a known command."
-      echo
-      Help
-      exit
+      # 检查当前位置是否是--proxy的URL参数位置
+      if [[ $i == $proxy_url_position ]]; then
+        # 跳过--proxy的URL参数
+        :
+      else
+        echo "$argument is not a known command."
+        echo
+        Help
+        exit
+      fi
       ;;
   esac
+  ((i++))
 done
 
 TelemetrySend $eventStateStarted $eventTypeInstall
